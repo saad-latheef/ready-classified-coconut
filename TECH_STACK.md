@@ -20,12 +20,13 @@ The backend is a high-performance Python Flask application implementing a Multi-
     *   **ML Agent**: Connects to a local **Roboflow Inference Server** (Docker) for real-time defect identification.
     *   **Analysis Agent**: Calculates volume (ellipsoid fitting), density, and performs factor-based voting for grading.
     *   **Sensor Agent**: Threaded serial interface (`pyserial`) for continuous bidirectional communication with ESP32.
-    *   **Gemini Vision Agent**: Leverages **Google Gemini 2.5 Flash Lite** for nuanced qualitative crack and mold detection.
+    *   **Gemini/Local Agent**: Hybrid system providing offline deterministic reports + online **Google Gemini 2.5 Flash Lite** for broad qualitative queries.
     *   **Trend Agent**: Manages SQLite data persistence and historical assessment retrieval.
 
 ## 3. AI & Model Stack
-*   **Reasoning/Vision**: Google Gemini 2.5 Flash Lite (`google-genai` SDK).
+*   **Reasoning/Analyst**: Google Gemini 2.5 Flash Lite (online) + Rule-Based Determanistic Engine (offline).
 *   **Object Detection**: Roboflow YOLO-based models for defect localization (holes, scratches, mold).
+
 *   **Inference Hub**: Roboflow Inference Docker Container (`localhost:9001`).
 
 ## 4. Hardware & IoT Integration

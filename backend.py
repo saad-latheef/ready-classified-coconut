@@ -728,7 +728,8 @@ class GeminiAnalysisAgent:
     """Uses Gemini AI to provide detailed coconut variety and quality analysis with Visual support"""
     def analyze(self, assessment, frame=None):
         if not gemini_client:
-            return "Gemini AI not available. Set GEMINI_API_KEY to enable detailed analysis."
+            print("[GeminiVision] Client not available, falling back to local analysis")
+            return self._generate_local_analysis(assessment)
         
         try:
             # Prepare image part if frame is available
@@ -764,28 +765,8 @@ Mold Spots: {'Yes' if assessment['moldSpots'] else 'No'}
 Cracks/Damage: {'Yes' if assessment['cracksDamage'] else 'No'}
 Issues: {', '.join(assessment['issues']) if assessment['issues'] else 'None'}
 
-Provide:
-1. **Quality Synopsis**: Overall health and quality summary
-2. **Physical Analysis**: Analyze maturity using Weight ({assessment['weight']}g), Volume ({assessment['volume']}cm³), and Density ({assessment['density']}g/cm³)
-3. **Internal Content**: Estimate water content/meat thickness based on density and shell color ({assessment['shellColor']})
-4. **Usage Recommendation**: Best culinary or industrial uses
-5. **Maintenance Advice**: Storage tips for this specific grade
-
-Keep it professional and detailed. Maximum 5-6 sentences.
-
-VISUAL CHECK (Urgently Critical):
-Examine the high-resolution image of the coconut shell with extreme care. 
-Look for ANY sign of:
-- Deep structural cracks or splits.
-- Hairline cracks or thin fissures.
-- Punctures, dents, or impact damage on the shell.
-- Any leakage or wet spots indicating a breach.
-
-INSTRUCTIONS:
-1. If ANY such defect is visible, you MUST include the exact string "CRACK_FOUND" (all caps) at the very start of your response.
-2. Detailed description: In the 'Quality Synopsis', provide a specific description of what you see (e.g., "haireline crack on the side", "deep split near the top").
-3. If no cracks/damage are visible, omit the "CRACK_FOUND" string.
-"""
+Provide synopsis, physical analysis, internal content estimate, usage recommendation, and maintenance advice."""
+            
             contents.append(prompt)
             print(f"[GeminiVision] --- ANALYSIS START --- Using Model: {DEFAULT_MODEL}")
             
@@ -798,12 +779,67 @@ INSTRUCTIONS:
             print(f"[GeminiVision] Final Decision - Crack identified: {'CRACK_FOUND' in raw_response.upper()}")
             return raw_response
         except Exception as e:
-            error_str = str(e).lower()
-            if "quota" in error_str or "429" in error_str:
-                return "AI Analysis Quota Reached. Please wait a moment and try again."
-            if "connection" in error_str or "timeout" in error_str or "unreachable" in error_str:
-                return "Detailed Analysis Offline: Please connect to the internet for AI-powered reports and visual crack detection."
-            return f"Gemini Analysis Error: {str(e)}"
+            print(f"[GeminiVision] Error during analysis: {e}. Falling back to local analysis.")
+            return self._generate_local_analysis(assessment)
+
+    def _generate_local_analysis(self, assessment):
+        """Generates a detailed structured report locally without AI when Gemini is offline"""
+        grade = assessment.get('grade', 'Ungraded')
+        score = assessment.get('score', 0)
+        weight = assessment.get('weight', 0)
+        volume = assessment.get('volume', 0)
+        density = assessment.get('density', 0)
+        issues = assessment.get('issues', [])
+        color = assessment.get('shellColor', 'Unknown')
+        water = assessment.get('waterContent', 0)
+        
+        # 1. Quality Synopsis
+        synopsis = f"This coconut has been graded as **Grade {grade}** with a quality score of **{score}/100**. "
+        if issues:
+            synopsis += f"Key observations include: {', '.join(issues)}. "
+        else:
+            synopsis += "The external shell appears healthy and structurally sound. "
+
+        # 2. Physical Analysis
+        maturity = "mature" if color == "Brown" else "young"
+        phys_desc = "standard"
+        if density > 1.0: phys_desc = "high-density"
+        elif density < 0.6: phys_desc = "low-density/lightweight"
+        
+        physical = f"At {weight}g and a volume of {volume:.0f}cm³, the specimen exhibits {phys_desc} characteristics. "
+        physical += f"The calculated density of {density:.2f}g/cm³ is typical for a {maturity} coconut of this size."
+
+        # 3. Internal Content
+        content_est = "generous" if water > 200 else "adequate" if water > 100 else "limited"
+        internal = f"Hydration analysis estimates a **{content_est}** liquid volume of approximately **{water}ml**. "
+        if color == "Green":
+            internal += "The internal meat (endosperm) is likely tender and high in sweetness."
+        else:
+            internal += "The meat is expected to be firm and thick, suitable for oil or desiccated processing."
+
+        # 4. Usage Recommendation
+        if grade == 'A':
+            usage = "Ideal for premium retail, bottled water, or high-end culinary fresh use."
+        elif grade == 'B':
+            usage = "Recommended for general market sale or standard household consumption."
+        else:
+            usage = "Best suited for industrial processing, oil extraction, or animal feed components."
+
+        # 5. Maintenance Advice
+        advice = "Store in a cool, ventilated area away from direct sunlight. "
+        if color == "Green": advice += "Consume within 3-5 days for peak freshness."
+        else: advice += "Shelf life is approximately 10-14 days if kept dry."
+
+        report = f"""**LOCAL DETAILED ANALYSIS (OFFLINE)**
+
+1. **Quality Synopsis**: {synopsis}
+2. **Physical Analysis**: {physical}
+3. **Internal Content**: {internal}
+4. **Usage Recommendation**: {usage}
+5. **Maintenance Advice**: {advice}
+
+*Note: This report was generated locally using deterministic sensor data.*"""
+        return report
 
 class TrendAgent:
     def save(self, assessment, frame=None):

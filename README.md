@@ -5,7 +5,7 @@ An AI-powered, multi-agent industrial automation system for real-time coconut gr
 
 ## 🌟 Overview
 
-The **Coconut Quality Checker** is a professional-grade industrial tool designed to standardize and accelerate the coconut grading process. By integrating high-speed hardware sensors with advanced computer vision and Generative AI, the system removes human subjectivity from quality control. It features a unique "throw-and-detect" workflow: simply place or throw a coconut onto the scale, and the system instantly captures dimensions, weight, and internal water level while performing a 360° visual health check for defects like mold, cracks, or holes.
+The **Coconut Quality Checker** is a professional-grade industrial tool designed to standardize and accelerate the coconut grading process. By integrating high-speed hardware sensors with advanced computer vision and Generative A   I, the system removes human subjectivity from quality control. It features a unique "throw-and-detect" workflow: simply place or throw a coconut onto the scale, and the system instantly captures dimensions, weight, and internal water level while performing a 360° visual health check for defects like mold, cracks, or holes.
 
 ## 🛠️ Tech Stack (The Quick Version)
 
@@ -17,11 +17,13 @@ This project leverages a sophisticated mix of hardware and software to automate 
 -   **Dynamic Water Level Detection**: State-based spike analysis on the ESP32 to compute milliliters (ml) from impact settles.
 -   **Automated Dimensioning**: Computer vision-based ellipsoid fitting to measure major and minor axes in cm.
 -   **Rule-Based Grading Engine**: A robust voting system (A, B, C) that aggregates physical metrics and visual defects.
+-   **Hybrid Analysis System**: 
+    -   **Offline Reports**: Detailed, deterministic 5-point quality reports generated locally (no API required).
+    -   **Online AI Copilot**: Sophisticated natural language interface for historical data trends and grading advice.
 -   **Multi-Agent Vision Pipeline**: 
     -   **Roboflow Agent**: Rapid identification of holes, cracks, mold, and transparency.
-    -   **Gemini Agent**: Nuanced visual analysis for final quality reporting.
--   **Real-time Streaming**: Zero-lag MJPEG video feed and WebSocket-based weight trend plotter.
--   **AI Copilot**: Natural language interface to query historical data and get grading advice.
+    -   **Local Analysis Agent**: Automatic fallback for detailed reports if AI-key is unavailable.
+
 
 ## 🧱 Detailed Tech Stack
 
