@@ -62,7 +62,7 @@ Weight: ${record.weight}g
 Dimensions: ${record.majorAxis}cm (L) x ${record.minorAxis}cm (W) x ${record.height}cm (H)
 Volume: ${record.volume} cm³
 Density: ${record.density} g/cm³
-Water Level: ${record.waterContent}
+Water Level: ${record.waterContent} ml
 ---------------------------------
 ASSESSMENT DETAILS:
 Shell Color: ${record.shellColor}
@@ -202,7 +202,7 @@ GENERATED ON: ${new Date().toLocaleString()}
                 <div>
                   <span className="text-gray-500 block mb-1">Water Level</span>
                   <span className="font-bold text-gray-900">{record.waterContent}</span>
-                  <span className="text-gray-500 ml-1">L</span>
+                  <span className="text-gray-500 ml-1">ml</span>
                 </div>
               </div>
 

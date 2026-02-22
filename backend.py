@@ -12,20 +12,27 @@ import os
 import math
 import serial
 import numpy as np
+import concurrent.futures
 from google import genai
 from google.genai import types
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 from inference_sdk import InferenceHTTPClient
 from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for Next.js frontend
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # --- CONFIGURATION ---
 ROBOFLOW_API_URL = "http://localhost:9001"
 ROBOFLOW_API_KEY = "vX3xJcrhB0TPB71Q5RSc"
-ROBOFLOW_MODEL_ID = "my-first-project-nlg8h/5"
+ROBOFLOW_MODEL_ID = "my-first-project-nlg8h/6"
+
+# Scratch and Hole Detection Model
+ROBOFLOW_SCRATCH_API_KEY = "CScNG4RG0ERfvFWW0q5M"
+ROBOFLOW_SCRATCH_MODEL_ID = "my-first-project-8caij/4"
 GEMINI_API_KEY = "AIzaSyB5dGPsk6Ec1HITdiOJF50NVuVPAQoaVKY"  # Hardcoded API key
 
 # Dimension Measurement Configuration
@@ -35,14 +42,15 @@ MAX_AREA = 500000  # Increased from 300000 to allow larger objects
 BORDER_MARGIN = 10
 HEIGHT_OFFSET = 0.0  # Set to 0 since user said 0 should be 0
 HEIGHT_CALIBRATION_FACTOR = 1.67 # Factor to fix 9cm showing as 15cm (15/9)
-WEIGHT_CALIBRATION_FACTOR = 3.165 # Factor to fix 300g displaying as 94.8g
+WEIGHT_CALIBRATION_FACTOR = 0.00229345 # Maps raw 436024.11 units to 1000g
 
 # Hardware Serial Configuration
-SERIAL_PORT = 'COM10'
-BAUD_RATE = 115200
+SERIAL_PORT = 'COM14'
+BAUD_RATE = 921600
 
 # Initialize Clients
 ml_client = InferenceHTTPClient(api_url=ROBOFLOW_API_URL, api_key=ROBOFLOW_API_KEY)
+scratch_client = InferenceHTTPClient(api_url=ROBOFLOW_API_URL, api_key=ROBOFLOW_SCRATCH_API_KEY)
 
 # Configure Gemini
 gemini_client = None
@@ -62,6 +70,16 @@ latest_frame = None
 latest_analysis = None
 lock = threading.Lock()
 camera_index = 0
+# Global Thread Pool for Multi-Agent Hub
+executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+
+# --- DECOUPLED STREAM STATE ---
+latest_raw_frame = None
+latest_display_frame = None
+latest_ml_results = {'predictions': []}
+latest_scratch_results = {'predictions': []}
+latest_dimension_data = None
+stream_lock = threading.Lock()
 # File paths
 DB_PATH = 'coconuts.db'
 CAPTURES_DIR = 'captures'
@@ -70,6 +88,7 @@ if not os.path.exists(CAPTURES_DIR):
 
 class SensorAgent:
     """Agent for reading real-time sensor data from USB Serial (NodeMCU)"""
+    
     def __init__(self, port=SERIAL_PORT, baud=BAUD_RATE):
         self.port = port
         self.baud = baud
@@ -78,8 +97,10 @@ class SensorAgent:
             "weight": 0.0,
             "water": 0.0
         }
+        self.tare_offset = 1300.0
         self.lock = threading.Lock()
         self.connected = False
+        
         self.thread = threading.Thread(target=self._read_serial, daemon=True)
         self.thread.start()
 
@@ -98,6 +119,11 @@ class SensorAgent:
                         raw_line = ser.readline()
                         line = raw_line.decode('utf-8', errors='ignore').strip()
                         if line:
+                            # Skip ESP32 debug messages (start with [)
+                            if line.startswith('['):
+                                print(f"[ESP32] {line}")
+                                continue
+                            
                             parts = line.split(',')
                             if len(parts) == 3:
                                 try:
@@ -108,32 +134,52 @@ class SensorAgent:
                                     with self.lock:
                                         self.data["height"] = h_val
                                         self.data["weight"] = w_val
-                                        self.data["water"] = wat_val
+                                        self.data["water"] = wat_val  # Water computed by ESP32
+                                    # Stream weight to all connected WebSocket clients
+                                    try:
+                                        socketio.emit('weight_data', {'w': w_val, 't': time.time()}, namespace='/')
+                                    except Exception:
+                                        pass
                                 except ValueError as ve:
-                                    print(f"[SensorAgent] Data conversion error: {ve} in line '{line}'")
+                                    pass  # Silently skip malformed data
                             else:
-                                if line:
-                                    print(f"[SensorAgent] Unexpected data format (expected 3 parts): '{line}'")
+                                if line and not line.startswith('['):
+                                    print(f"[SensorAgent] Unexpected format: '{line}'")
                     except Exception as read_err:
                         print(f"[SensorAgent] Read Error: {read_err}")
-                        break # Connection lost or error, exit thread
+                        break
             ser.close()
         except Exception as e:
             self.connected = False
             print(f"[SensorAgent] Serial Connection Failed: {e}. One-time check complete, thread terminating.")
 
     def get_data(self):
-        with self.lock:
-            processed_data = self.data.copy()
+        try:
+            with self.lock:
+                processed_data = self.data.copy()
+                
+            # Weight calibration
+            raw_diff = processed_data["weight"] - self.tare_offset
+            stable_raw = (raw_diff // 100) * 100
+            processed_data["weight"] = int(round(stable_raw * WEIGHT_CALIBRATION_FACTOR, 0))
             
-        # Apply Calibration globally
-        # Height: Apply scaling factor and offset (0 is 0, 7 is 15)
-        processed_data["height"] = round(processed_data["height"] * HEIGHT_CALIBRATION_FACTOR + HEIGHT_OFFSET, 2)
-        
-        # Weight: Apply calibration factor
-        processed_data["weight"] = round(processed_data["weight"] * WEIGHT_CALIBRATION_FACTOR, 1)
-        
-        return processed_data
+            # Water: pass through from ESP32 (already in ml)
+            # processed_data["water"] is already set from serial
+            
+            return processed_data
+        except Exception as e:
+            print(f"[SensorAgent] Critical error in get_data: {e}")
+            return {"height": 0.0, "weight": 0.0, "water": 0.0}
+
+    def tare(self):
+        with self.lock:
+            self.tare_offset = self.data["weight"]
+            print(f"[SensorAgent] Tare complete. New offset: {self.tare_offset}")
+        return True
+    
+    def reset_water_baseline(self):
+        """Reset water level - no-op since ESP32 handles it"""
+        print("[SensorAgent] Water detection managed by ESP32")
 
 # Global Sensor Agent instance
 sensor_agent = None
@@ -159,7 +205,7 @@ sensor_agent = get_sensor_agent()
 # --- AGENTS IMPLEMENTATION ---
 
 class IngestionAgent:
-    def __init__(self, src=1):  # Changed to 1 for USB webcam
+    def __init__(self, src=1):  # Changed to 0 for connected webcam
         print(f"[IngestionAgent] Initializing camera with source index {src}...")
         # Use CAP_DSHOW for faster startup on Windows
         self.cap = cv2.VideoCapture(src, cv2.CAP_DSHOW)
@@ -187,14 +233,104 @@ class IngestionAgent:
             self.cap.release()
             print("[IngestionAgent] Camera released")
 
+def background_capture_thread():
+    """Continuously grabs frames from the camera as fast as possible"""
+    global ingestion, latest_raw_frame
+    print("[System] Starting Background Capture Thread...")
+    while True:
+        try:
+            if ingestion is None:
+                ingestion = IngestionAgent()
+            
+            frame = ingestion.get_frame()
+            if frame is not None:
+                with stream_lock:
+                    latest_raw_frame = frame
+            else:
+                time.sleep(0.01)
+        except Exception as e:
+            print(f"[CaptureThread] Error: {e}")
+            time.sleep(1)
+
+def background_inference_thread():
+    """Runs AI Hub in the background without blocking the video stream"""
+    global latest_raw_frame, latest_ml_results, latest_scratch_results, latest_dimension_data
+    print("[System] Starting Background Inference Thread...")
+    frame_count = 0
+    while True:
+        try:
+            # Grab a snapshot of the current frame
+            frame = None
+            with stream_lock:
+                if latest_raw_frame is not None:
+                    frame = latest_raw_frame.copy()
+            
+            if frame is None:
+                time.sleep(0.1)
+                continue
+            
+            frame_count += 1
+            
+            # Parallel Multi-Agent Detection
+            futures_list = []
+            futures_list.append(executor.submit(ml_agent.detect, frame))
+            
+            # Check scratches every 2nd "inference" pass (not frame)
+            check_scratches = (frame_count % 2 == 0)
+            if check_scratches:
+                futures_list.append(executor.submit(ml_agent.detect_scratches, frame))
+            
+            # Use bounded wait
+            concurrent.futures.wait(futures_list, timeout=1.5)
+            
+            new_ml = {'predictions': []}
+            new_scratch = {'predictions': []}
+            
+            if futures_list[0].done():
+                new_ml = futures_list[0].result()
+            
+            if check_scratches and len(futures_list) > 1 and futures_list[1].done():
+                new_scratch = futures_list[1].result()
+            
+            # Dimension measurement (on Best Coconut)
+            new_dim = None
+            if new_ml.get('predictions'):
+                best = max(new_ml['predictions'], key=lambda x: x['confidence'])
+                x1, y1 = int(best['x'] - best['width']/2), int(best['y'] - best['height']/2)
+                bbox = (x1, y1, int(best['width']), int(best['height']))
+                new_dim = dimension_agent.measure(frame, bbox)
+            
+            # Update Global Results for the stream to pick up
+            with stream_lock:
+                latest_ml_results = new_ml
+                if check_scratches:
+                    latest_scratch_results = new_scratch
+                latest_dimension_data = new_dim
+                
+        except Exception as e:
+            print(f"[InferenceThread] Error: {e}")
+            time.sleep(0.1)
+
 class MLAgent:
     def detect(self, frame):
         try:
-            # inference_sdk handles the API call to local docker
+            # Main coconut detection
             results = ml_client.infer(frame, model_id=ROBOFLOW_MODEL_ID)
             return results
         except Exception as e:
-            print(f"ML Error: {e}")
+            print(f"ML Error (Coconut): {e}")
+            return {'predictions': []}
+
+    def detect_scratches(self, frame):
+        try:
+            # Scratch and hole detection
+            # print("[MLAgent] Calling scratch detection...")
+            results = scratch_client.infer(frame, model_id=ROBOFLOW_SCRATCH_MODEL_ID)
+            if results.get('predictions'):
+                print(f"[MLAgent] Scratch Detected: {len(results['predictions'])} results")
+            return results
+        except Exception as e:
+            print(f"ML Error (Scratch): {e}")
             return {'predictions': []}
 
 class DimensionAgent:
@@ -290,12 +426,12 @@ class DimensionAgent:
     def _calculate_axes(self, d1, d2):
         """Calculate major and minor axes in cm"""
         if d1 > d2:
-            major_cm = d1 * CM_PER_PIXEL
-            minor_cm = d2 * CM_PER_PIXEL
+            major_cm = d1 * CM_PER_PIXEL - 10.0  # -5 original + -5 extra
+            minor_cm = d2 * CM_PER_PIXEL - 5.0   # -5 extra
         else:
-            major_cm = d2 * CM_PER_PIXEL
-            minor_cm = d1 * CM_PER_PIXEL
-        return round(major_cm, 2), round(minor_cm, 2)
+            major_cm = d2 * CM_PER_PIXEL - 10.0
+            minor_cm = d1 * CM_PER_PIXEL - 5.0
+        return round(max(major_cm, 0), 2), round(max(minor_cm, 0), 2)
     
     def draw_measurement(self, frame, measurement):
         """Draw measurement visualization on frame"""
@@ -344,15 +480,26 @@ class DimensionAgent:
         return frame
 
 class AnalysisAgent:
-    def analyze(self, predictions, frame_shape, dimension_data=None, manual_weight=None):
+    def __init__(self):
+        # Cache last known good values for fallback
+        self._last = {
+            'shellColor': 'Unknown',
+            'majorAxis': 0,
+            'minorAxis': 0,
+        }
+
+    def analyze(self, predictions, frame_shape, dimension_data=None, manual_weight=None, scratch_preds=None, manual_water=None):
         # Default assessment
         assessment = {
-            "weight": 0, "diameter": 0, "waterContent": 0,
+            "weight": 0, "diameter": 0, "height": 0, "waterContent": 0,
+            "majorAxis": 0, "minorAxis": 0, "volume": 0, "density": 0,
             "shellColor": "unknown", "shakeSound": "unknown",
             "moldSpots": False, "cracksDamage": False,
             "score": 0, "grade": "Ungraded",
+            "scratchPercentage": 0.0, "scratchCount": 0,
             "issues": [], "recommendations": [],
-            "predictions": predictions
+            "predictions": predictions,
+            "scratch_predictions": []
         }
 
         if not predictions.get('predictions', []):
@@ -368,7 +515,7 @@ class AnalysisAgent:
         # Height and Weight are now pre-calibrated in sensor_agent.get_data()
         assessment['height'] = real_sensors['height']
         
-        # Use manual weight if provided, otherwise use sensor
+        # Use manual weight if provided, otherwise fall back to sensor
         if manual_weight is not None:
             try:
                 assessment['weight'] = float(manual_weight)
@@ -378,8 +525,15 @@ class AnalysisAgent:
         else:
             assessment['weight'] = real_sensors['weight']
         
-        # Water content from Analog Sensor
-        assessment['waterContent'] = real_sensors['water']
+        # Water content from manual input or sensor fallback
+        if manual_water is not None:
+            try:
+                assessment['waterContent'] = float(manual_water)
+                print(f"[AnalysisAgent] Using MANUAL water level: {assessment['waterContent']}ml")
+            except:
+                assessment['waterContent'] = real_sensors['water']
+        else:
+            assessment['waterContent'] = real_sensors['water']
 
         # Dimensions from Computer Vision
         if dimension_data:
@@ -392,6 +546,15 @@ class AnalysisAgent:
             assessment['diameter'] = diameter_cm
             assessment['majorAxis'] = diameter_cm
             assessment['minorAxis'] = round(diameter_cm * 0.9, 1)
+
+        # Cache axes if valid, otherwise use last known
+        if assessment['majorAxis'] > 0 and assessment['minorAxis'] > 0:
+            self._last['majorAxis'] = assessment['majorAxis']
+            self._last['minorAxis'] = assessment['minorAxis']
+        else:
+            assessment['majorAxis'] = self._last['majorAxis']
+            assessment['minorAxis'] = self._last['minorAxis']
+            assessment['diameter'] = self._last['majorAxis']
 
         # 1.5 Physics Calculations
         # V = (π / 6) * A * B * H
@@ -416,50 +579,42 @@ class AnalysisAgent:
             assessment['moldSpots'] = True
             assessment['issues'].append("Mold spots detected")
 
-        # 3. Grading Logic
-        score = 100
-        if assessment['cracksDamage']: 
-            score -= 40
-            if "Crack/Damage detected" not in assessment['issues']:
-                assessment['issues'].append("Crack/Damage detected")
+        # 2.5 Scratch & Hole Detection (log only, does NOT affect grade)
+        if scratch_preds:
+            for sp in scratch_preds:
+                s_cls = sp.get('class', '').lower()
+                if 'hole' in s_cls:
+                    assessment['cracksDamage'] = True  # Only holes set this
+                issue_msg = f"Potential {s_cls} detected"
+                if issue_msg not in assessment['issues']:
+                    assessment['issues'].append(issue_msg)
+
+        # 2.6 Scratch Percentage Calculation (Area-based)
+        scratch_area = 0
+        if scratch_preds:
+            for sp in scratch_preds:
+                scratch_area += sp.get('width', 0) * sp.get('height', 0)
+        
+        coconut_area = 0
+        if dimension_data and 'ellipse' in dimension_data:
+            # pi * r1 * r2
+            _, (d1, d2), _ = dimension_data['ellipse']
+            coconut_area = math.pi * (d1 / 2.0) * (d2 / 2.0)
+        elif best_pred:
+            # Fallback to bbox area
+            coconut_area = best_pred.get('width', 0) * best_pred.get('height', 0)
             
-        if assessment['moldSpots']: score -= 30
-        
-        # New Sizing Rule: 13cm (L) x 10cm (W) is the minimum for Grade A
-        is_undersized = assessment['majorAxis'] < 13 or assessment['minorAxis'] < 10
-        if is_undersized:
-            score -= 20
-            if "Undersized (<13x10cm)" not in assessment['issues']:
-                assessment['issues'].append("Undersized (<13x10cm)")
-        
-        assessment['score'] = max(0, score)
-        
-        # Base Grading
-        if score >= 90: grade = "A"
-        elif score >= 70: grade = "B"
-        elif score >= 50: grade = "C"
-        else: grade = "D"
+        if coconut_area > 0:
+            assessment['scratchPercentage'] = round((scratch_area / coconut_area) * 100, 2)
+            if assessment['scratchPercentage'] > 5:
+                assessment['issues'].append(f"High scratch density: {assessment['scratchPercentage']}%")
+        else:
+            assessment['scratchPercentage'] = 0.0
 
-        # CAP AT GRADE B IF UNDERSIZED
-        if is_undersized and grade == "A":
-            grade = "B"
-            print(f"[AnalysisAgent] Capping Grade at B due to size {assessment['majorAxis']}x{assessment['minorAxis']}")
-
-        # FORCE GRADE C/D IF CRACKS EXIST
-        if assessment['cracksDamage']:
-            if grade in ["A", "B"]:
-                grade = "C"
-                print(f"[AnalysisAgent] Downgrading to C due to cracks (Original score {score})")
+        # 3. NEW GRADING SYSTEM - Rule-based A/B/C Classification
+        # ========================================================
         
-        assessment['grade'] = grade
-
-        # 4. Recommendations
-        if assessment['grade'] == "A":
-            assessment['recommendations'].append("Premium Quality - Package for retail")
-        elif assessment['grade'] == "D":
-            assessment['recommendations'].append("Discard or use for processing")
-        
-        # 5. Metadata
+        # Move shellColor detection FIRST (needed for grading)
         cls_lower = cls.lower()
         if 'green' in cls_lower:
             assessment['shellColor'] = "Green"
@@ -467,6 +622,105 @@ class AnalysisAgent:
             assessment['shellColor'] = "Brown"
         else:
             assessment['shellColor'] = "Unknown"
+        
+        # Cache color
+        if assessment['shellColor'] != 'Unknown':
+            self._last['shellColor'] = assessment['shellColor']
+        else:
+            assessment['shellColor'] = self._last['shellColor']
+        
+        # RULE 1: HOLE = INSTANT C GRADE (overrides everything)
+        has_hole = False
+        if scratch_preds:
+            for sp in scratch_preds:
+                if 'hole' in sp.get('class', '').lower():
+                    has_hole = True
+                    if "Hole detected" not in assessment['issues']:
+                        assessment['issues'].append("Hole detected")
+        
+        if has_hole:
+            assessment['grade'] = "C"
+            assessment['score'] = 30
+            assessment['recommendations'].append("Hole detected - C Grade (processing only)")
+            print("[AnalysisAgent] INSTANT C GRADE: Hole detected")
+            return assessment
+        
+        # RULE 2: Classify each factor into A/B/C
+        height_val = assessment['height']
+        weight_val = assessment['weight']
+        water_val = assessment['waterContent']
+        color = assessment['shellColor']
+        
+        grades = []  # Collect grade votes from each factor
+        
+        # --- Height ---
+        if height_val > 12:
+            grades.append('A')
+        elif height_val >= 10:
+            grades.append('B')
+        else:
+            grades.append('C')
+            if "Small size (height < 10cm)" not in assessment['issues']:
+                assessment['issues'].append("Small size (height < 10cm)")
+        
+        # --- Weight ---
+        if weight_val >= 1100:
+            grades.append('A')
+        elif weight_val >= 700:
+            grades.append('B')
+        elif weight_val >= 300:
+            grades.append('C')
+        else:
+            grades.append('C')
+            if "Very lightweight (< 300g)" not in assessment['issues']:
+                assessment['issues'].append("Very lightweight (< 300g)")
+        
+        # --- Water Content (ml) ---
+        if water_val >= 200:
+            grades.append('A')  # High
+        elif water_val >= 100:
+            grades.append('B')  # Medium
+        else:
+            grades.append('C')  # Low
+        
+        # --- Appearance (Color only, scratches don't affect grade) ---
+        if color == "Green":
+            grades.append('A')  # Clean smooth green
+        elif color == "Brown":
+            grades.append('B')  # Brown
+        else:
+            grades.append('B')  # Unknown defaults to B
+        
+        # FINAL GRADE: Majority vote (worst grade wins ties)
+        grade_order = {'A': 0, 'B': 1, 'C': 2}
+        a_count = grades.count('A')
+        b_count = grades.count('B')
+        c_count = grades.count('C')
+        
+        if c_count >= max(a_count, b_count):
+            grade = "C"
+        elif a_count >= b_count:
+            grade = "A"
+        else:
+            grade = "B"
+        
+        # Calculate score from grade
+        if grade == "A":
+            assessment['score'] = 90 + min(10, a_count * 2)
+        elif grade == "B":
+            assessment['score'] = 70 + min(19, b_count * 3)
+        else:
+            assessment['score'] = max(10, 50 - c_count * 5)
+        
+        assessment['grade'] = grade
+        
+        # 4. Recommendations
+        if grade == "A":
+            assessment['recommendations'].append("Premium Quality - Package for retail")
+        elif grade == "B":
+            assessment['recommendations'].append("Standard Quality - Suitable for market")
+        else:
+            assessment['recommendations'].append("Low Quality - Processing or discard")
         
         return assessment
 
@@ -544,10 +798,12 @@ INSTRUCTIONS:
             print(f"[GeminiVision] Final Decision - Crack identified: {'CRACK_FOUND' in raw_response.upper()}")
             return raw_response
         except Exception as e:
-            error_str = str(e)
-            if "429" in error_str:
+            error_str = str(e).lower()
+            if "quota" in error_str or "429" in error_str:
                 return "AI Analysis Quota Reached. Please wait a moment and try again."
-            return f"Gemini Analysis Error: {error_str}"
+            if "connection" in error_str or "timeout" in error_str or "unreachable" in error_str:
+                return "Detailed Analysis Offline: Please connect to the internet for AI-powered reports and visual crack detection."
+            return f"Gemini Analysis Error: {str(e)}"
 
 class TrendAgent:
     def save(self, assessment, frame=None):
@@ -575,8 +831,8 @@ class TrendAgent:
         cursor.execute('''
             INSERT INTO assessments (
                 id, weight, diameter, height, majorAxis, minorAxis, volume, density, waterContent, shellColor, shakeSound,
-                moldSpots, cracksDamage, score, grade, issues, recommendations, predictions, geminiAnalysis, createdAt, imagePath
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                moldSpots, cracksDamage, score, grade, issues, recommendations, predictions, geminiAnalysis, scratchPercentage, createdAt, imagePath
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             record_id, assessment['weight'], assessment['diameter'], assessment['height'],
             assessment.get('majorAxis', 0), assessment.get('minorAxis', 0),
@@ -585,7 +841,8 @@ class TrendAgent:
             1 if assessment['moldSpots'] else 0, 1 if assessment['cracksDamage'] else 0,
             assessment['score'], assessment['grade'],
             json.dumps(assessment['issues']), json.dumps(assessment['recommendations']),
-            json.dumps(assessment['predictions']), assessment['geminiAnalysis'], created_at, image_path
+            json.dumps(assessment['predictions']), assessment['geminiAnalysis'], 
+            assessment.get('scratchPercentage', 0.0), created_at, image_path
         ))
         
         conn.commit()
@@ -670,7 +927,8 @@ def init_db():
         'weight': 'REAL',
         'volume': 'REAL',
         'density': 'REAL',
-        'imagePath': 'TEXT'
+        'imagePath': 'TEXT',
+        'scratchPercentage': 'REAL'
     }
     
     for col_name, col_type in new_columns.items():
@@ -689,52 +947,58 @@ def init_db():
 @app.route('/video_feed')
 def video_feed():
     def generate():
+        global latest_raw_frame, latest_ml_results, latest_scratch_results, latest_dimension_data
+        
         while True:
-            # Lazy initialize ingestion agent if needed
-            global ingestion
-            if ingestion is None:
-                ingestion = IngestionAgent()
-
-            frame = ingestion.get_frame()
-            if frame is None:
-                break
+            try:
+                # 1. Grab Current state (Snapshot)
+                frame = None
+                ml_res = None
+                scratch_res = None
+                dim_data = None
                 
-            # Make a copy for visualization
-            display_frame = frame.copy()
-            
-            # Run ML Inference
-            results = ml_agent.detect(frame)
-            
-            # Get dimension measurements (use first detection's bbox if available)
-            dimension_data = None
-            if results.get('predictions'):
-                preds = results['predictions']
+                with stream_lock:
+                    if latest_raw_frame is not None:
+                        frame = latest_raw_frame.copy()
+                    ml_res = latest_ml_results.copy()
+                    scratch_res = latest_scratch_results.copy()
+                    dim_data = latest_dimension_data
+                
+                if frame is None:
+                    time.sleep(0.03) # ~30fps wait
+                    continue
+                
+                # 2. Draw detections on the frame replica
+                # Coconut (Green) - Show only the BEST match to avoid overlapping issues
+                preds = ml_res.get('predictions', [])
                 if preds:
                     best_pred = max(preds, key=lambda x: x['confidence'])
                     x, y, w, h = int(best_pred['x']), int(best_pred['y']), int(best_pred['width']), int(best_pred['height'])
-                    x1, y1 = int(x - w/2), int(y - h/2)
-                    bbox = (x1, y1, w, h)
-                    dimension_data = dimension_agent.measure(frame, bbox)
-            
-            # Draw ML Bounding Boxes
-            for pred in results.get('predictions', []):
-                x, y, w, h = int(pred['x']), int(pred['y']), int(pred['width']), int(pred['height'])
-                x1, y1 = int(x - w/2), int(y - h/2)
-                x2, y2 = int(x + w/2), int(y + h/2)
+                    cv2.rectangle(frame, (int(x-w/2), int(y-h/2)), (int(x+w/2), int(y+h/2)), (0, 255, 0), 2)
+                    cv2.putText(frame, f"{best_pred['class']}", (int(x-w/2), int(y-h/2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
                 
-                color = (0, 255, 0)
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 2)
-                label = f"{pred['class']} {pred['confidence']:.2f}"
-                cv2.putText(display_frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-            
-            # Draw dimension measurements (ellipse and axes)
-            if dimension_data:
-                display_frame = dimension_agent.draw_measurement(display_frame, dimension_data)
+                # Scratch & Hole (Blue)
+                for pred in scratch_res.get('predictions', []):
+                    x, y, w, h = int(pred['x']), int(pred['y']), int(pred['width']), int(pred['height'])
+                    cls_name = pred.get('class', 'Defect').upper()
+                    cv2.rectangle(frame, (int(x-w/2), int(y-h/2)), (int(x+w/2), int(y+h/2)), (255, 0, 0), 2)
+                    cv2.putText(frame, cls_name, (int(x-w/2), int(y-h/2)-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
-            ret, buffer = cv2.imencode('.jpg', display_frame)
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                if dim_data:
+                    frame = dimension_agent.draw_measurement(frame, dim_data)
+
+                # 3. Stream at optimized resolution
+                display_frame = cv2.resize(frame, (640, 480))
+                ret, buffer = cv2.imencode('.jpg', display_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+                
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+                
+                time.sleep(0.01) # Small throttle to CPU
+                
+            except Exception as e:
+                print(f"[VideoFeed] View error: {e}")
+                time.sleep(0.1)
                    
     return Response(generate(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
@@ -765,28 +1029,20 @@ def save_detection():
     # 4. Analysis Agent (with dimension data and optional manual weight)
     data = request.json or {}
     manual_weight = data.get('manual_weight')
-    assessment = analysis_agent.analyze(results, frame.shape, dimension_data, manual_weight)
+    manual_water = data.get('manual_water')
+    
+    # 4.5 Run scratch detection for the saved report and percentage calculation
+    scratch_results = ml_agent.detect_scratches(frame)
+    scratch_preds = scratch_results.get('predictions', [])
+    
+    # 4.6 Single Analysis Pass (Includes Scratches and Percentage)
+    assessment = analysis_agent.analyze(results, frame.shape, dimension_data, manual_weight, scratch_preds=scratch_preds, manual_water=manual_water)
+    assessment['scratch_predictions'] = scratch_preds
+    assessment['scratchCount'] = len(scratch_preds)
     
     # 5. Gemini Analysis Agent (With Image Support)
     gemini_analysis = gemini_analysis_agent.analyze(assessment, frame)
     assessment['geminiAnalysis'] = gemini_analysis
-    
-    # Check for visual crack detection from Gemini (Improved Detection)
-    # Check both tag and general mentions in a case-insensitive way
-    analysis_upper = gemini_analysis.upper()
-    if "[CRACK_DETECTED]" in analysis_upper or "CRACK_FOUND" in analysis_upper:
-        print("[System] Gemini Vision identified a crack!")
-        assessment['cracksDamage'] = True
-        if "Visual crack detected by Gemini" not in assessment['issues']:
-            assessment['issues'].append("Visual crack detected by Gemini")
-        
-        # Ensure Grade is C or D
-        if assessment['grade'] in ["A", "B"]:
-            assessment['grade'] = "C"
-            print("[System] Forcing Grade C due to Gemini crack detection")
-        
-        # Ensure score reflects this
-        assessment['score'] = min(69, assessment['score'])
     
     # 6. Trend Agent (save to DB with Image)
     saved_record = trend_agent.save(assessment, frame)
@@ -801,6 +1057,22 @@ def get_history():
 def delete_record(id):
     trend_agent.delete(id)
     return jsonify({"status": "deleted"})
+
+@app.route('/api/tare', methods=['POST'])
+def tare_sensors():
+    agent = get_sensor_agent()
+    if agent:
+        agent.tare()
+        return jsonify({"status": "success", "message": "Sensors tared to zero"})
+    return jsonify({"status": "error", "message": "Sensor agent not available"}), 500
+
+@app.route('/api/water_reset', methods=['POST'])
+def water_reset():
+    agent = get_sensor_agent()
+    if agent:
+        agent.reset_water_baseline()
+        return jsonify({"status": "success", "message": "Water baseline reset"})
+    return jsonify({"status": "error", "message": "Sensor agent not available"}), 500
 
 @app.route('/api/sensors', methods=['GET'])
 def get_sensors():
@@ -872,8 +1144,13 @@ if __name__ == '__main__':
     init_db()
     # Ensure sensor agent is active
     get_sensor_agent()
-    print("[System] Ready.")
     
-    # Run Flask
+    # Start DECOUPLED AGENTS
+    threading.Thread(target=background_capture_thread, daemon=True).start()
+    threading.Thread(target=background_inference_thread, daemon=True).start()
+    
+    print("[System] Zero-Lag Decoupled Stream Architecture Ready.")
+    
+    # Run Flask with SocketIO for real-time WebSocket streaming
     # FIX: Set use_reloader=False to prevent double-start that blocks the COM port
-    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True, use_reloader=False)
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True, use_reloader=False, allow_unsafe_werkzeug=True)

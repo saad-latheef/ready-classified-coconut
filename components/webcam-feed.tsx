@@ -2,13 +2,15 @@
 
 import { useRef, useEffect, useState } from "react"
 import { Button } from "@/components/ui/button"
-import { Camera, Loader2, AlertCircle, Weight, Ruler, Waves, TrendingUp } from "lucide-react"
-import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts"
+import { Camera, Loader2, AlertCircle, Weight, Ruler, Waves, Droplets } from "lucide-react"
+import { SerialPlotter } from "@/components/serial-plotter"
 
 interface CaptureResult {
   grade: string
   score: number
   geminiAnalysis?: string
+  scratchPercentage?: number
+  scratchCount?: number
 }
 
 interface SensorData {
@@ -22,8 +24,9 @@ export function WebcamFeed() {
   const [lastResult, setLastResult] = useState<CaptureResult | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [sensors, setSensors] = useState<SensorData>({ height: 0, weight: 0, water: 0 })
-  const [weightHistory, setWeightHistory] = useState<{ time: string, weight: number }[]>([])
+  const [liveWeight, setLiveWeight] = useState<number>(0)
   const [manualWeight, setManualWeight] = useState<string>("")
+  const [manualWater, setManualWater] = useState<string>("")
   
   // Flask Streaming URL
   const STREAM_URL = "http://localhost:5000/video_feed"
@@ -37,26 +40,13 @@ export function WebcamFeed() {
         if (response.ok) {
           const data = await response.json()
           setSensors(data)
-          
-          // Update graph history
-          setWeightHistory(prev => {
-            const now = new Date();
-            const timeStr = now.toLocaleTimeString([], { second: '2-digit' }) + '.' + Math.floor(now.getMilliseconds() / 10);
-            
-            const newHistory = [...prev, { 
-              time: timeStr, 
-              weight: Number(data.weight.toFixed(1)) 
-            }]
-            // Keep last 100 readings for a high-frequency trend
-            return newHistory.slice(-100)
-          })
         }
       } catch (err) {
         console.error("Sensor polling failed:", err)
       }
     }
 
-    const interval = setInterval(pollSensors, 50) // Max frequency: 50ms (20 times per second)
+    const interval = setInterval(pollSensors, 200) // Reduced to 5Hz (200ms) for stability
     return () => clearInterval(interval)
   }, [])
 
@@ -70,7 +60,8 @@ export function WebcamFeed() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ 
-          manual_weight: manualWeight ? parseFloat(manualWeight) : null 
+          manual_weight: manualWeight ? parseFloat(manualWeight) : null,
+          manual_water: manualWater ? parseFloat(manualWater) : null
         })
       })
 
@@ -79,7 +70,9 @@ export function WebcamFeed() {
         setLastResult({
           grade: result.grade,
           score: result.score,
-          geminiAnalysis: result.geminiAnalysis
+          geminiAnalysis: result.geminiAnalysis,
+          scratchPercentage: result.scratchPercentage,
+          scratchCount: result.scratchCount
         })
       } else {
         setError("Failed to save assessment")
@@ -92,19 +85,19 @@ export function WebcamFeed() {
     }
   }
 
+
+
   return (
     <div className="flex flex-col h-full gap-4">
         {/* Live Metrics Dashboard */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-2">
-          <div className="bg-white p-4 rounded-xl border border-green-100 shadow-sm flex items-center justify-between group hover:border-green-300 transition-all">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-green-50 rounded-lg text-green-600">
-                <Weight className="w-5 h-5" />
-              </div>
-              <div>
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Live Weight</p>
-                <h3 className="text-xl font-bold text-gray-800">{sensors.weight.toFixed(1)} <span className="text-sm font-normal text-gray-400">g</span></h3>
-              </div>
+          <div className="bg-white p-4 rounded-xl border border-green-100 shadow-sm flex items-center gap-3 group hover:border-green-300 transition-all">
+            <div className="p-2 bg-green-50 rounded-lg text-green-600">
+              <Weight className="w-5 h-5" />
+            </div>
+            <div>
+              <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Live Weight</p>
+              <h3 className="text-xl font-bold text-gray-800">{liveWeight.toFixed(1)} <span className="text-sm font-normal text-gray-400">g</span></h3>
             </div>
           </div>
           <div className="bg-white p-4 rounded-xl border border-blue-100 shadow-sm flex items-center justify-between group hover:border-blue-300 transition-all">
@@ -125,7 +118,7 @@ export function WebcamFeed() {
               </div>
               <div>
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Water Level</p>
-                <h3 className="text-xl font-bold text-gray-800">{sensors.water.toFixed(2)} <span className="text-sm font-normal text-gray-400">L</span></h3>
+                <h3 className="text-xl font-bold text-gray-800">{Math.round(sensors.water)} <span className="text-sm font-normal text-gray-400">ml</span></h3>
               </div>
             </div>
           </div>
@@ -158,35 +151,35 @@ export function WebcamFeed() {
           )}
         </div>
 
-        {/* Live Weight Graph */}
-        <div className="bg-white p-4 rounded-xl border border-green-100 shadow-sm mb-4">
-          <div className="flex items-center gap-2 mb-4">
-            <TrendingUp className="w-4 h-4 text-green-600" />
-            <span className="text-sm font-bold text-gray-700 uppercase tracking-wider">Weight Trend (Live)</span>
+        {/* Manual Water Level Input */}
+        <div className="bg-white p-4 rounded-xl border border-cyan-100 shadow-sm flex items-center gap-4 mb-2">
+          <div className="p-2 bg-cyan-50 rounded-lg text-cyan-600">
+            <Droplets className="w-5 h-5" />
           </div>
-          <div className="h-48 w-full">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart data={weightHistory}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-                <XAxis dataKey="time" hide />
-                <YAxis domain={[0, 'auto']} tick={{fontSize: 10}} stroke="#9ca3af" unit="g" />
-                <Tooltip 
-                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }}
-                  labelStyle={{ fontWeight: 'bold', color: '#059669' }}
-                  formatter={(value: number) => [`${value} g`, 'Weight']}
-                />
-                <Line 
-                  type="monotone" 
-                  dataKey="weight" 
-                  stroke="#10b981" 
-                  strokeWidth={3} 
-                  dot={false}
-                  isAnimationActive={false} // Disable animation for smoother real-time look
-                />
-              </LineChart>
-            </ResponsiveContainer>
+          <div className="flex-1">
+            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-1">Manual Water Level (ml)</p>
+            <input 
+              type="number" 
+              placeholder="Enter water level in ml..."
+              value={manualWater}
+              onChange={(e) => setManualWater(e.target.value)}
+              className="w-full bg-gray-50 border border-gray-200 rounded-lg px-3 py-2 text-sm font-bold text-gray-800 focus:outline-none focus:ring-2 focus:ring-cyan-500 transition-all"
+            />
           </div>
+          {manualWater && (
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={() => setManualWater("")}
+              className="text-gray-400 hover:text-red-500"
+            >
+              Clear
+            </Button>
+          )}
         </div>
+
+        {/* Live Weight Serial Plotter */}
+        <SerialPlotter onWeightUpdate={setLiveWeight} />
 
         <div className="relative w-full h-[450px] rounded-2xl overflow-hidden bg-black border-4 border-white shadow-xl">
            {/* MJPEG Stream from Flask */}
@@ -206,7 +199,7 @@ export function WebcamFeed() {
                Live Agent Hub
              </div>
              <div className="bg-black/60 backdrop-blur-md text-white/90 px-3 py-1 rounded-full font-mono text-[10px] border border-white/20">
-               {sensors.weight > 0 ? "STABLE" : "WAITING FOR SENSOR"}
+               {liveWeight > 0 ? "STABLE" : "WAITING FOR SENSOR"}
              </div>
            </div>
         </div>
@@ -224,11 +217,23 @@ export function WebcamFeed() {
               <div className="text-xl font-black text-gray-800">
                 LATEST GRADE: <span className="text-green-600">{lastResult.grade}</span>
               </div>
-              <div className="bg-green-100 text-green-700 px-3 py-1 rounded-full font-bold text-sm">
-                {lastResult.score}/100
+              <div className="flex flex-col items-end gap-1">
+                <div className="bg-green-100 text-green-700 px-3 py-1 rounded-full font-bold text-sm">
+                  {lastResult.score}/100
+                </div>
+                {lastResult.scratchCount !== undefined && lastResult.scratchCount > 0 && (
+                  <div className="text-[10px] font-bold text-orange-600 uppercase tracking-tighter bg-orange-50 px-2 py-0.5 rounded-md border border-orange-100">
+                    {lastResult.scratchCount} Scratch{lastResult.scratchCount > 1 ? 'es' : ''}
+                  </div>
+                )}
+                {lastResult.scratchPercentage !== undefined && lastResult.scratchPercentage > 0 && (
+                  <div className="text-[10px] font-bold text-red-500 uppercase tracking-tighter bg-red-50 px-2 py-0.5 rounded-md border border-red-100">
+                    {lastResult.scratchPercentage}% Scratched
+                  </div>
+                )}
               </div>
             </div>
-            {lastResult.geminiAnalysis && (
+            {lastResult.geminiAnalysis && !lastResult.geminiAnalysis.startsWith("Gemini Analysis Error") && (
               <div className="p-4 bg-gray-50 rounded-xl border border-gray-100 italic text-sm text-gray-600 leading-relaxed">
                 "{lastResult.geminiAnalysis.split('.')[0]}..."
               </div>

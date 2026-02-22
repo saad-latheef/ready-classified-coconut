@@ -1,45 +1,47 @@
 # 🥥 Coconut Quality Checker
+### "Precision Grading for the Perfect Coconut — Where AI meets Hardware."
 
-An AI-powered, multi-agent computer vision system for real-time coconut grading, dimension measurement, and quality assessment.
-
-![Coconut Quality Checker](public/placeholder-logo.png)
+An AI-powered, multi-agent industrial automation system for real-time coconut grading, dimension measurement, and quality assessment.
 
 ## 🌟 Overview
 
-The **Coconut Quality Checker** is a sophisticated industrial automation tool designed to standardize and speed up the coconut grading process. It combines high-speed computer vision, hardware sensor integration (Weight, Height, Water Content), and Generative AI to provide deep qualitative insights.
+The **Coconut Quality Checker** is a professional-grade industrial tool designed to standardize and accelerate the coconut grading process. By integrating high-speed hardware sensors with advanced computer vision and Generative AI, the system removes human subjectivity from quality control. It features a unique "throw-and-detect" workflow: simply place or throw a coconut onto the scale, and the system instantly captures dimensions, weight, and internal water level while performing a 360° visual health check for defects like mold, cracks, or holes.
+
+## 🛠️ Tech Stack (The Quick Version)
+
+This project leverages a sophisticated mix of hardware and software to automate coconut quality assessment. On the hardware side, an **ESP32 XIAO** microcontroller interfaces with **HX711** load cells and **HC-SR04** ultrasonic sensors to capture precise weight and dimensional data at native speeds. The backend is powered by a **Flask**-based multi-agent system that orchestrates real-time sensor processing, **Roboflow**-based object detection for physical defects, and **Google Gemini 2.5 Flash Lite** for deep qualitative vision analysis. All data is persisted in a local **SQLite** database and presented through a premium **Next.js 14** dashboard featuring real-time WebSocket weight plotting and an interactive AI copilot.
 
 ## 🚀 Core Features
 
--   **Real-time Video Feed**: Live MJPEG streaming with overlay detections and measurements.
--   **Automated Dimensioning**: Computer vision-based ellipsoid fitting to measure Major and Minor axes in cm.
--   **Hardware Integration**: Threaded serial communication with NodeMCU/Arduino for live weight and height data.
--   **AI Grading Engine**: 
-    -   **ML Agent**: YOLOv8/v11 for object detection and defect identification (mold, cracks).
-    -   **Analysis Agent**: Calculates volume, density, and assigns grades (A-D) based on physical parameters and defects.
-    -   **Gemini Vision Agent**: Deep visual analysis using Google Gemini 2.5 Flash Lite for nuanced quality reports and crack detection.
--   **Historical Tracking**: SQLite database persistence for all assessments with image captures.
--   **AI Copilot**: Integrate chatbot for querying database records and general coconut quality advice.
--   **Export Capabilities**: Export assessment history to CSV for reporting.
+-   **High-Speed Sensor Fusion**: Real-time weight, height, and water level capture via ESP32.
+-   **Dynamic Water Level Detection**: State-based spike analysis on the ESP32 to compute milliliters (ml) from impact settles.
+-   **Automated Dimensioning**: Computer vision-based ellipsoid fitting to measure major and minor axes in cm.
+-   **Rule-Based Grading Engine**: A robust voting system (A, B, C) that aggregates physical metrics and visual defects.
+-   **Multi-Agent Vision Pipeline**: 
+    -   **Roboflow Agent**: Rapid identification of holes, cracks, mold, and transparency.
+    -   **Gemini Agent**: Nuanced visual analysis for final quality reporting.
+-   **Real-time Streaming**: Zero-lag MJPEG video feed and WebSocket-based weight trend plotter.
+-   **AI Copilot**: Natural language interface to query historical data and get grading advice.
 
-## 🛠️ Tech Stack
+## 🧱 Detailed Tech Stack
 
 ### Frontend
 -   **Framework**: Next.js 14 (App Router)
 -   **Styling**: Tailwind CSS + Shadcn UI
--   **Visualization**: Recharts (20 FPS Live Trend Graph)
--   **Icons**: Lucide React
+-   **Communication**: WebSocket (for 50Hz Weight Plotting) + HTTP Pooling
+-   **Visualization**: Custom Canvas-based Serial Plotter for raw sensor data.
 
 ### Backend (Multi-Agent Orchestration)
 -   **Framework**: Flask (Python 3.10+)
--   **Vision**: OpenCV (with CAP_DSHOW optimization)
--   **ML Inference**: Roboflow Inference SDK (running in Docker)
--   **Generative AI**: Google Gemini 2.5 Flash Lite
+-   **Vision**: OpenCV (ellipsoid fitting & contour analysis)
+-   **Inference**: Roboflow Inference SDK
+-   **AI**: Google Gemini 2.5 Flash Lite
 -   **Database**: SQLite3
 
 ### Hardware / IoT
--   **Controller**: NodeMCU / Arduino
--   **Sensors**: Load Cell (HX711), Ultrasonic Sensor, Moisture Probe
--   **Communication**: USB Serial (115200 Baud)
+-   **Controller**: ESP32 XIAO (C6/Sense)
+-   **Sensors**: Load Cell (HX711), Ultrasonic (HC-SR04)
+-   **Communication**: USB Serial (921600 Baud)
 
 ## 📁 Project Structure
 
