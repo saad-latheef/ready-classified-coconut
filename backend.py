@@ -33,7 +33,6 @@ ROBOFLOW_MODEL_ID = "my-first-project-nlg8h/6"
 # Scratch and Hole Detection Model
 ROBOFLOW_SCRATCH_API_KEY = "CScNG4RG0ERfvFWW0q5M"
 ROBOFLOW_SCRATCH_MODEL_ID = "my-first-project-8caij/4"
-GEMINI_API_KEY = "AIzaSyB5dGPsk6Ec1HITdiOJF50NVuVPAQoaVKY"  # Hardcoded API key
 
 # Dimension Measurement Configuration
 CM_PER_PIXEL = 0.06014
