@@ -27,11 +27,11 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
 # --- CONFIGURATION ---
 ROBOFLOW_API_URL = "http://localhost:9001"
-ROBOFLOW_API_KEY = "vX3xJcrhB0TPB71Q5RSc"
+ROBOFLOW_API_KEY = "API_KEY"
 ROBOFLOW_MODEL_ID = "my-first-project-nlg8h/6"
 
 # Scratch and Hole Detection Model
-ROBOFLOW_SCRATCH_API_KEY = "CScNG4RG0ERfvFWW0q5M"
+ROBOFLOW_SCRATCH_API_KEY = "SCRATCH_API_KEY"
 ROBOFLOW_SCRATCH_MODEL_ID = "my-first-project-8caij/4"
 
 # Dimension Measurement Configuration
